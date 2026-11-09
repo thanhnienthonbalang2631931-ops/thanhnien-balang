@@ -11,6 +11,7 @@
   let rotateTimer = null;
   let scannerStream = null;
   let scannerFrame = 0;
+  let scannerTimer = 0;
   let scannerActive = false;
 
   const $ = (s, root = document) => root.querySelector(s);
@@ -35,7 +36,8 @@
   function stopScanner() {
     scannerActive = false;
     if (scannerFrame) cancelAnimationFrame(scannerFrame);
-    scannerFrame = 0;
+    if (scannerTimer) clearTimeout(scannerTimer);
+    scannerFrame = 0; scannerTimer = 0;
     if (scannerStream) scannerStream.getTracks().forEach(t => t.stop());
     scannerStream = null;
   }
@@ -69,16 +71,16 @@
   }
   function roleCanOpen() { const role=getUser()?.role || window.currentRole; return ['Bí thư','Phó Bí thư','Ủy viên BCH','Đoàn viên'].includes(String(role || '')); }
   function activities() { return Array.isArray(window.db?.activities) ? window.db.activities : []; }
-  function renderNav() {
-    const nav = $('#nav'); if (!nav) return;
-    let button = nav.querySelector('[data-page="qr"]');
-    if (!button) {
-      button = document.createElement('button'); button.type = 'button'; button.dataset.page = 'qr';
-      button.innerHTML = '<span class="ico">▦</span><span class="navtext">Điểm danh QR</span>';
-      button.addEventListener('click', () => window.showPage('qr'));
-      nav.appendChild(button);
-    }
-    button.style.display = roleCanOpen() ? '' : 'none';
+  function addAttendanceEntry() {
+    if (window.page !== 'attendance') return;
+    const head = document.querySelector('#content .pagehead');
+    if (!head || head.querySelector('[data-open-balang-qr]')) return;
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'btn primary';
+    button.dataset.openBalangQr = '1';
+    button.textContent = '▦ Quản lý điểm danh QR';
+    head.appendChild(button);
   }
   function pageShell(title, subtitle, content) {
     return `<div class="qr-module"><div class="pagehead"><div><h1>${esc(title)}</h1><p class="muted">${esc(subtitle)}</p></div></div>${content}</div>`;
@@ -200,7 +202,21 @@
       const video=$('#qrScannerVideo'); if(!video)return stopScanner(); video.srcObject=scannerStream; await video.play();
       if(!('BarcodeDetector' in window)){const status=$('#qrScannerStatus');if(status)status.textContent='Trình duyệt chưa hỗ trợ đọc QR trực tiếp. Dùng camera điện thoại mở liên kết QR hoặc dán token vào ô bên dưới.';return;}
       const detector=new BarcodeDetector({formats:['qr_code']}); scannerActive=true;
-      const tick=async()=>{if(!scannerActive)return;try{if(video.readyState>=2){const codes=await detector.detect(video);const raw=codes?.[0]?.rawValue;if(raw){const token=parseQrToken(raw);if(token){stopScanner();await checkinToken(token);return;}}}}catch(e){const status=$('#qrScannerStatus');if(status)status.textContent='Chưa đọc được mã. Hãy giữ điện thoại ổn định.';}if(scannerActive)scannerFrame=requestAnimationFrame(tick);}; tick();
+      const tick=async()=>{
+        if(!scannerActive || !document.contains(video)) return stopScanner();
+        try {
+          if(video.readyState>=2){
+            const codes=await detector.detect(video);
+            const raw=codes?.[0]?.rawValue;
+            if(raw){const token=parseQrToken(raw);if(token){stopScanner();await checkinToken(token);return;}}
+          }
+        } catch(e) {
+          const status=$('#qrScannerStatus');
+          if(status)status.textContent='Chưa đọc được mã. Hãy giữ điện thoại ổn định.';
+        }
+        if(scannerActive) scannerTimer=setTimeout(tick,180);
+      };
+      tick();
     }catch(e){stopScanner();const status=$('#qrScannerStatus');if(status)status.textContent=e.name==='NotAllowedError'?'Bạn chưa cấp quyền camera. Hãy cấp quyền rồi thử lại.':'Không mở được camera. Hãy kiểm tra HTTPS và thiết bị.';}
   }
   async function refreshMyAttendance() {
@@ -225,6 +241,8 @@
       if(e.target.id==='qrManualForm'){e.preventDefault();try{const aid=$('#qrAttendanceActivity')?.value;if(!aid)throw new Error('Hãy chọn hoạt động trước.');await api(`/api/qr/activities/${encodeURIComponent(aid)}/manual`,{method:'POST',body:{memberId:$('#qrManualMember').value,status:$('#qrManualStatus').value,reason:$('#qrManualReason').value}});notify('Đã lưu điểm danh thủ công.');await refreshAttendance(aid);}catch(x){notify(x.message);}}
     });
     content.addEventListener('click',async e=>{
+      const openQr=e.target.closest('[data-open-balang-qr]');
+      if(openQr){e.preventDefault();window.showPage('qr');return;}
       const b=e.target.closest('[data-action]');if(!b)return;const action=b.dataset.action,id=b.dataset.id;
       try{
         if(action==='qr-logout'){sessionStorage.removeItem(TOKEN_KEY);sessionStorage.removeItem(USER_KEY);stopRotation();renderQrManager();}
@@ -247,13 +265,17 @@
     window.render=function(){
       if(location.hash.startsWith('#qr-checkin=')){const handled=renderCheckinRoute();bindEvents();return handled;}
       if(window.page==='qr'){const html=renderQrManager(window.__balangQrSelectedActivity);bindEvents();return html;}
-      return typeof old==='function'?old.apply(this,arguments):undefined;
+      stopScanner();
+      const result=typeof old==='function'?old.apply(this,arguments):undefined;
+      if(window.page==='attendance') addAttendanceEntry();
+      return result;
     };
   }
   function showPageOverride() {
     const old=window.showPage;
     window.showPage=function(p){
-      if(p==='qr'){if(!roleCanOpen())return notify('Vai trò hiện tại không được truy cập phân hệ QR.');window.page='qr';if(typeof window.setActive==='function')window.setActive();document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.page==='qr'));renderQrManager();bindEvents();renderNav();return;}
+      if(p==='qr'){if(!roleCanOpen())return notify('Vai trò hiện tại không được truy cập phân hệ QR.');window.page='qr';if(typeof window.setActive==='function')window.setActive();document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.page==='qr'));renderQrManager();bindEvents();return;}
+      if(p!=='qr') stopScanner();
       return typeof old==='function'?old.apply(this,arguments):undefined;
     };
   }
@@ -265,9 +287,6 @@
   }
   function install() {
     installStyles();
-    renderNav();
-    const oldVisibility=window.applyRoleVisibility;
-    window.applyRoleVisibility=function(){if(typeof oldVisibility==='function')oldVisibility.apply(this,arguments);renderNav();};
     showPageOverride();renderOverride();bindEvents();
     if(location.hash.startsWith('#qr-checkin=')){renderCheckinRoute();bindEvents();}
     window.addEventListener('hashchange',()=>{if(location.hash.startsWith('#qr-checkin=')){renderCheckinRoute();bindEvents();}});
@@ -279,4 +298,3 @@
   }
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',install,{once:true});else install();
 })();
-
